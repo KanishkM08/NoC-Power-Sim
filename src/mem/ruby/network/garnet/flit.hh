@@ -53,9 +53,10 @@ class flit
     flit() {}
     flit(int packet_id, int id, int vc, int vnet, RouteInfo route, int size,
          MsgPtr msg_ptr, int MsgSize, uint32_t bWidth, Tick curTime);
-
+	
     virtual ~flit(){};
-
+    uint64_t get_data_payload() const { return m_data_payload; }
+    void set_data_payload(uint64_t data) { m_data_payload = data; }
     int get_outport() {return m_outport; }
     int get_size() { return m_size; }
     Tick get_enqueue_time() { return m_enqueue_time; }
@@ -131,6 +132,7 @@ class flit
     Tick src_delay;
     std::pair<flit_stage, Tick> m_stage;
     unsigned int m_seq_num = 0;
+    uint64_t m_data_payload;
 };
 
 inline std::ostream&

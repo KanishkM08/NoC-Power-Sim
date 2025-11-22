@@ -55,4 +55,4 @@ Source('flit.cc')
 Source('Credit.cc')
 Source('NetworkBridge.cc')
 Source('HammingDistanceSorter.cc')
-
+DebugFlag('HammingDistance')

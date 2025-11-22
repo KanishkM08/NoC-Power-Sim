@@ -447,20 +447,40 @@ NetworkInterface::flitisizeMessage(MsgPtr msg_ptr, int vnet)
             fl->set_src_delay(curTick() - msg_ptr->getTime());
             fl->setSeqNum(i);
 
+            // ------------------------------------------------------------
+            // CRITICAL ADDITION: SETTING THE SYNTHETIC DATA PAYLOAD
+            // The data payload is used by the HammingDistanceSorter.
+            // Using m_id (NI ID) and flit index (i) ensures unique data 
+            // for the body flits, allowing the sorting logic to work.
+            // ------------------------------------------------------------
+            uint64_t data_payload = 0;
+
+            if (num_flits > 2 && i > 0 && i < num_flits - 1) {
+                // Only assign unique data to body flits for sorting
+                // You can modify this assignment for different traffic patterns
+                data_payload = ((uint64_t)m_id << 32) | (uint64_t)i;
+            } else if (i == 0) {
+                 // Head flit can hold a simple identifier
+                 data_payload = (uint64_t)m_id;
+            }
+            // Tail flit (i == num_flits - 1) keeps 0 or a simple identifier
+
+            fl->set_data_payload(data_payload);
+            
             flit_vec.push_back(fl);
         }
 
         // ------------------------------------------------------------
-        // SORTING LOGIC HERE (skip header=0 and tail=num_flits-1)
+        // SORTING LOGIC: Only apply to body flits (index 1 to N-2)
         // ------------------------------------------------------------
         if (num_flits > 2) {
+            // Create a view of the body flits
             std::vector<flit*> body_flits(
                 flit_vec.begin() + 1,
                 flit_vec.end() - 1
             );
             
-        
-
+            // Perform the sort
             HammingDistanceSorter::sortFlits(body_flits);
 
             // Put sorted body flits back in place
@@ -475,8 +495,10 @@ NetworkInterface::flitisizeMessage(MsgPtr msg_ptr, int vnet)
         
         for (auto f : flit_vec){
                 std::stringstream ss;
-        	f->print(ss);
-		std::cout << "OUTPUT FLIT: " << ss.str() << std::endl;
+                // Add data payload to print for debugging
+                ss << "Data=" << f->get_data_payload() << " "; 
+                f->print(ss);
+            std::cout << "OUTPUT FLIT: " << ss.str() << std::endl;
         }
 
         // Insert flits into NI VC buffer in new order

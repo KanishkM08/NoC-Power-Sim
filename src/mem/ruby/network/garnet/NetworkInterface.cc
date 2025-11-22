@@ -370,63 +370,55 @@ NetworkInterface::checkStallQueue()
     }
 }
 
-// Embed the protocol message into flits
 bool
 NetworkInterface::flitisizeMessage(MsgPtr msg_ptr, int vnet)
 {
     Message *net_msg_ptr = msg_ptr.get();
     NetDest net_msg_dest = net_msg_ptr->getDestination();
 
-    // gets all the destinations associated with this message.
     std::vector<NodeID> dest_nodes = net_msg_dest.getAllDest();
 
-    // Number of flits is dependent on the link bandwidth available.
-    // This is expressed in terms of bytes/cycle or the flit size
     OutputPort *oPort = getOutportForVnet(vnet);
     assert(oPort);
-    int num_flits = (int)divCeil((float) m_net_ptr->MessageSizeType_to_int(
-        net_msg_ptr->getMessageSize()), (float)oPort->bitWidth());
+
+    int num_flits = (int)divCeil(
+        (float)m_net_ptr->MessageSizeType_to_int(net_msg_ptr->getMessageSize()),
+        (float)oPort->bitWidth());
 
     DPRINTF(RubyNetwork, "Message Size:%d vnet:%d bitWidth:%d\n",
         m_net_ptr->MessageSizeType_to_int(net_msg_ptr->getMessageSize()),
         vnet, oPort->bitWidth());
 
-    // loop to convert all multicast messages into unicast messages
     for (int ctr = 0; ctr < dest_nodes.size(); ctr++) {
 
-        // this will return a free output virtual channel
         int vc = calculateVC(vnet);
+        if (vc == -1)
+            return false;
 
-        if (vc == -1) {
-            return false ;
-        }
         MsgPtr new_msg_ptr = msg_ptr->clone();
         NodeID destID = dest_nodes[ctr];
 
         Message *new_net_msg_ptr = new_msg_ptr.get();
         if (dest_nodes.size() > 1) {
             NetDest personal_dest(m_net_ptr->getRubySystem());
-            for (int m = 0; m < (int) MachineType_NUM; m++) {
-                if ((destID >= MachineType_base_number((MachineType) m)) &&
-                    destID < MachineType_base_number((MachineType) (m+1))) {
-                    // calculating the NetDest associated with this destID
+            for (int m = 0; m < (int)MachineType_NUM; m++) {
+                if ((destID >= MachineType_base_number((MachineType)m)) &&
+                    destID < MachineType_base_number((MachineType)(m+1))) {
+
                     personal_dest.clear();
-                    personal_dest.add((MachineID) {(MachineType) m, (destID -
-                        MachineType_base_number((MachineType) m))});
+                    personal_dest.add((MachineID){
+                        (MachineType)m,
+                        (destID - MachineType_base_number((MachineType)m))
+                    });
+
                     new_net_msg_ptr->getDestination() = personal_dest;
                     break;
                 }
             }
-            net_msg_dest.removeNetDest(personal_dest);
-            // removing the destination from the original message to reflect
-            // that a message with this particular destination has been
-            // flitisized and an output vc is acquired
-            net_msg_ptr->getDestination().removeNetDest(personal_dest);
+            net_msg_dest.removeNetDest(new_net_msg_ptr->getDestination());
+            net_msg_ptr->getDestination().removeNetDest(
+                new_net_msg_ptr->getDestination());
         }
-
-        // Embed Route into the flits
-        // NetDest format is used by the routing table
-        // Custom routing algorithms just need destID
 
         RouteInfo route;
         route.vnet = vnet;
@@ -435,45 +427,70 @@ NetworkInterface::flitisizeMessage(MsgPtr msg_ptr, int vnet)
         route.src_router = oPort->routerID();
         route.dest_ni = destID;
         route.dest_router = m_net_ptr->get_router_id(destID, vnet);
-
-        // initialize hops_traversed to -1
-        // so that the first router increments it to 0
         route.hops_traversed = -1;
 
         m_net_ptr->increment_injected_packets(vnet);
         m_net_ptr->update_traffic_distribution(route);
+
         int packet_id = m_net_ptr->getNextPacketID();
-	// Create a vector to hold all flits in the packet
-	std::vector<flit*> flit_vec;
 
-	for (int i = 0; i < num_flits; i++) {
-	    m_net_ptr->increment_injected_flits(vnet);
-	    flit *fl = new flit(packet_id,
-		i, vc, vnet, route, num_flits, new_msg_ptr,
-		m_net_ptr->MessageSizeType_to_int(
-		net_msg_ptr->getMessageSize()),
-		oPort->bitWidth(), curTick());
+        std::vector<flit*> flit_vec;
 
-	    fl->set_src_delay(curTick() - msg_ptr->getTime());
-	    fl->setSeqNum(i); // assign sequence number
-	    flit_vec.push_back(fl);
-	}
+        for (int i = 0; i < num_flits; i++) {
+            m_net_ptr->increment_injected_flits(vnet);
 
-	// Sort the flits by Hamming distance (skip header and tail)
-	HammingDistanceSorter::sortFlits(flit_vec);
+            flit *fl = new flit(
+                packet_id, i, vc, vnet, route, num_flits, new_msg_ptr,
+                m_net_ptr->MessageSizeType_to_int(net_msg_ptr->getMessageSize()),
+                oPort->bitWidth(), curTick());
 
-	// Push sorted flits into NI buffers
-	for (auto f : flit_vec) {
-	    niOutVcs[vc].insert(f);
-	}
-	DPRINTF(RubyNetwork, "HDS sorted %d flits for packet %d\n",
-		flit_vec.size(), packet_id);
+            fl->set_src_delay(curTick() - msg_ptr->getTime());
+            fl->setSeqNum(i);
+
+            flit_vec.push_back(fl);
+        }
+
+        // ------------------------------------------------------------
+        // SORTING LOGIC HERE (skip header=0 and tail=num_flits-1)
+        // ------------------------------------------------------------
+        if (num_flits > 2) {
+            std::vector<flit*> body_flits(
+                flit_vec.begin() + 1,
+                flit_vec.end() - 1
+            );
+            
+        
+
+            HammingDistanceSorter::sortFlits(body_flits);
+
+            // Put sorted body flits back in place
+            std::copy(
+                body_flits.begin(),
+                body_flits.end(),
+                flit_vec.begin() + 1
+            );
+        }
+        
+        DPRINTF(RubyNetwork,"Kanishk\n");
+        
+        for (auto f : flit_vec){
+                std::stringstream ss;
+        	f->print(ss);
+		std::cout << "OUTPUT FLIT: " << ss.str() << std::endl;
+        }
+
+        // Insert flits into NI VC buffer in new order
+        for (auto f : flit_vec) {
+            niOutVcs[vc].insert(f);
+        }
 
         m_ni_out_vcs_enqueue_time[vc] = curTick();
         outVcState[vc].setState(ACTIVE_, curTick());
     }
-    return true ;
+
+    return true;
 }
+
 
 // Looking for a free output vc
 int
